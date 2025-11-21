@@ -17,6 +17,7 @@ export default function Auth({ onAuth }) {
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState('')
   const [hint, setHint] = useState('')
+  const [serverOk, setServerOk] = useState(null) // null = unknown, true/false
 
   const backend = useMemo(() => getBackendBase(), [])
 
@@ -34,16 +35,42 @@ export default function Auth({ onAuth }) {
   useEffect(() => {
     if (!backend) {
       setHint('Server URL is not configured. Please set VITE_BACKEND_URL and reload.')
+      return
     }
+    // Auto-ping on mount to surface connectivity status
+    ;(async () => {
+      const ok = await pingServer(backend)
+      setServerOk(ok)
+      if (!ok) setHint('Trying to reach the server... we will retry automatically.')
+    })()
   }, [backend])
 
-  const pingServer = async () => {
+  async function pingServer(base) {
+    const controller = new AbortController()
+    const t = setTimeout(() => controller.abort(), 4500)
     try {
-      const res = await fetch(`${backend}/test`, { method: 'GET' })
+      // ultra-fast ping endpoint
+      const res = await fetch(`${base}/ping`, { method: 'GET', signal: controller.signal })
       return res.ok
     } catch (e) {
       return false
+    } finally {
+      clearTimeout(t)
     }
+  }
+
+  async function withRetry(fn, retries = 2) {
+    let lastErr
+    for (let i = 0; i <= retries; i++) {
+      try {
+        return await fn()
+      } catch (e) {
+        lastErr = e
+        // small backoff
+        await new Promise(r => setTimeout(r, 500 * (i + 1)))
+      }
+    }
+    throw lastErr
   }
 
   const submit = async (e) => {
@@ -69,23 +96,24 @@ export default function Auth({ onAuth }) {
 
     setLoading(true)
     try {
-      const alive = await pingServer()
+      const alive = await pingServer(backend)
+      setServerOk(alive)
       if (!alive) throw new Error('Could not reach the server')
 
       let res
       if (mode === 'signup') {
-        res = await fetch(`${backend}/auth/signup`, {
+        res = await withRetry(() => fetch(`${backend}/auth/signup`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ name, username, number, password })
-        })
+        }))
       } else {
         const identifier = username.trim()
-        res = await fetch(`${backend}/auth/login`, {
+        res = await withRetry(() => fetch(`${backend}/auth/login`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ identifier, password })
-        })
+        }))
       }
       const data = await res.json().catch(() => ({}))
       if (!res.ok) throw new Error(data.detail || 'Failed to authenticate')
@@ -93,10 +121,12 @@ export default function Auth({ onAuth }) {
       localStorage.setItem('role', data.role)
       onAuth && onAuth({ token: data.token, role: data.role, user: data.user })
     } catch (err) {
-      if (String(err.message).toLowerCase().includes('reach the server') || String(err.message).toLowerCase().includes('failed to fetch')) {
+      const msg = String(err.message || '')
+      if (msg.toLowerCase().includes('reach the server') || msg.toLowerCase().includes('failed to fetch') || msg.toLowerCase().includes('network')) {
         setError('Could not reach the server. Please check your connection and try again.')
+        setHint(`Server: ${backend}`)
       } else {
-        setError(err.message || 'Something went wrong')
+        setError(msg || 'Something went wrong')
       }
     } finally {
       setLoading(false)
@@ -109,6 +139,19 @@ export default function Auth({ onAuth }) {
       <div className="relative w-full max-w-md bg-white/5 backdrop-blur-xl border border-white/10 rounded-3xl p-8 shadow-2xl">
         <h1 className="text-3xl font-bold text-white text-center mb-2">Slash Messenger</h1>
         <p className="text-center text-blue-200/80 mb-6">Modern, lightweight, stylish</p>
+
+        {/* Server status indicator */}
+        <div className="mb-4 text-sm">
+          {serverOk === null && (
+            <span className="text-blue-200/80">Checking server…</span>
+          )}
+          {serverOk === true && (
+            <span className="text-emerald-300">Server reachable</span>
+          )}
+          {serverOk === false && (
+            <span className="text-amber-300">Server not reachable yet. Retrying on submit…</span>
+          )}
+        </div>
 
         <div className="flex gap-2 mb-6">
           <button type="button" onClick={() => setMode('login')} className={`flex-1 py-2 rounded-xl transition ${mode==='login' ? 'bg-blue-600 text-white' : 'bg-white/5 text-blue-200 hover:bg-white/10'}`}>Login</button>
