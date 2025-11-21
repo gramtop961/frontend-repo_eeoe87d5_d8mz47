@@ -1,25 +1,57 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 
-function Avatar({ url, name }) {
+function Avatar({ url, name, size = 10 }) {
   return (
-    <div className="w-10 h-10 rounded-full bg-white/10 flex items-center justify-center text-white overflow-hidden">
+    <div className={`w-${size} h-${size} rounded-full bg-white/10 flex items-center justify-center text-white overflow-hidden`}> 
       {url ? <img src={url} alt={name} className="w-full h-full object-cover"/> : <span className="text-sm">{name?.[0]?.toUpperCase()}</span>}
     </div>
   )
 }
 
-export default function Home({ me, onLogout }) {
+function MediaBubble({ m }) {
+  if (m.kind === 'image') return <img src={m.media_url} className="max-w-full rounded-xl" />
+  if (m.kind === 'video') return (
+    <video src={m.media_url} controls className="max-w-full rounded-xl" />
+  )
+  if (m.kind === 'audio' || m.kind === 'voice') return (
+    <audio src={m.media_url} controls className="w-64" />
+  )
+  return <a href={m.media_url} className="underline" target="_blank" rel="noreferrer">{m.kind} attachment</a>
+}
+
+export default function Home({ me: initialMe, onLogout }) {
+  const [me, setMe] = useState(initialMe)
+
+  // Search / conversations / chat
   const [q, setQ] = useState('')
   const [results, setResults] = useState([])
   const [convos, setConvos] = useState([])
   const [active, setActive] = useState(null)
   const [text, setText] = useState('')
   const [messages, setMessages] = useState([])
+  const [sending, setSending] = useState(false)
+
+  // Profile editor
+  const [pName, setPName] = useState('')
+  const [pUsername, setPUsername] = useState('')
+  const [pNumber, setPNumber] = useState('')
+  const [pBio, setPBio] = useState('')
+  const [savingProfile, setSavingProfile] = useState(false)
+
+  const fileInputRef = useRef(null)
+  const avatarInputRef = useRef(null)
 
   const backend = import.meta.env.VITE_BACKEND_URL
   const token = localStorage.getItem('token')
+  const authHeader = useMemo(() => ({ 'Authorization': `Bearer ${token}` }), [token])
 
-  const authHeader = { 'Authorization': `Bearer ${token}` }
+  useEffect(() => {
+    setMe(initialMe)
+    setPName(initialMe?.name || '')
+    setPUsername(initialMe?.username || '')
+    setPNumber(initialMe?.number || '')
+    setPBio(initialMe?.bio || '')
+  }, [initialMe])
 
   const loadConvos = async () => {
     const res = await fetch(`${backend}/messages/conversations`, { headers: authHeader })
@@ -41,20 +73,87 @@ export default function Home({ me, onLogout }) {
     if (res.ok) setMessages(data.messages)
   }
 
-  const send = async () => {
+  const sendText = async () => {
     if (!active || !text.trim()) return
+    setSending(true)
     const res = await fetch(`${backend}/messages/send`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', ...authHeader },
       body: JSON.stringify({ to_identifier: active.id, kind: 'text', text })
     })
     const data = await res.json()
+    setSending(false)
     if (res.ok) {
       setMessages(prev => [...prev, { id: data.id, sender_id: me.id, receiver_id: active.id, kind: 'text', text, created_at: data.created_at }])
       setText('')
       loadConvos()
     } else {
       alert(data.detail || 'Failed to send')
+    }
+  }
+
+  const attachAndSend = async (file) => {
+    if (!file || !active) return
+    try {
+      const form = new FormData()
+      form.append('file', file)
+      const up = await fetch(`${backend}/upload`, { method: 'POST', headers: authHeader, body: form })
+      const upData = await up.json()
+      if (!up.ok) throw new Error(upData.detail || 'Upload failed')
+      const media_url = `${backend}${upData.url}`
+      const kind = upData.kind || 'image'
+      const res = await fetch(`${backend}/messages/send`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', ...authHeader },
+        body: JSON.stringify({ to_identifier: active.id, kind, media_url })
+      })
+      const data = await res.json()
+      if (!res.ok) throw new Error(data.detail || 'Send failed')
+      setMessages(prev => [...prev, { id: data.id, sender_id: me.id, receiver_id: active.id, kind, media_url, created_at: data.created_at }])
+      loadConvos()
+    } catch (e) {
+      alert(e.message)
+    }
+  }
+
+  const onPickFile = () => fileInputRef.current?.click()
+  const onPickAvatar = () => avatarInputRef.current?.click()
+
+  const onAvatarSelected = async (e) => {
+    const file = e.target.files?.[0]
+    if (!file) return
+    try {
+      const form = new FormData()
+      form.append('file', file)
+      const up = await fetch(`${backend}/upload`, { method: 'POST', headers: authHeader, body: form })
+      const upData = await up.json()
+      if (!up.ok) throw new Error(upData.detail || 'Upload failed')
+      const url = `${backend}${upData.url}`
+      const res = await fetch(`${backend}/me`, { method: 'PATCH', headers: { 'Content-Type': 'application/json', ...authHeader }, body: JSON.stringify({ avatar_url: url }) })
+      const data = await res.json()
+      if (!res.ok) throw new Error(data.detail || 'Failed to update')
+      setMe(data)
+    } catch (e) {
+      alert(e.message)
+    }
+  }
+
+  const saveProfile = async () => {
+    setSavingProfile(true)
+    try {
+      const res = await fetch(`${backend}/me`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json', ...authHeader },
+        body: JSON.stringify({ name: pName, username: pUsername, number: pNumber, bio: pBio })
+      })
+      const data = await res.json()
+      if (!res.ok) throw new Error(data.detail || 'Failed to save')
+      setMe(data)
+      alert('Profile saved')
+    } catch (e) {
+      alert(e.message)
+    } finally {
+      setSavingProfile(false)
     }
   }
 
@@ -73,15 +172,28 @@ export default function Home({ me, onLogout }) {
   useEffect(() => { const t = setTimeout(search, 300); return () => clearTimeout(t) }, [q])
 
   return (
-    <div className="min-h-screen grid md:grid-cols-[320px_1fr] bg-slate-900 text-white">
+    <div className="min-h-screen grid md:grid-cols-[360px_1fr] bg-slate-900 text-white">
       <aside className="border-r border-white/10 p-4 space-y-4">
         <div className="flex items-center gap-3">
-          <Avatar url={me.avatar_url} name={me.name}/>
+          <div className="relative">
+            <Avatar url={me.avatar_url} name={me.name} size={12}/>
+            <button onClick={onPickAvatar} className="absolute -bottom-1 -right-1 text-[10px] bg-blue-600 rounded-full px-2 py-1">Edit</button>
+            <input ref={avatarInputRef} type="file" accept="image/*" className="hidden" onChange={onAvatarSelected} />
+          </div>
           <div>
             <div className="font-semibold">{me.name}</div>
             <div className="text-xs text-blue-200/70">@{me.username}</div>
           </div>
           <button className="ml-auto text-xs text-red-300 hover:text-red-400" onClick={onLogout}>Logout</button>
+        </div>
+
+        <div className="bg-white/5 rounded-2xl p-3 space-y-2">
+          <div className="text-xs uppercase tracking-wide text-blue-200/60">Your profile</div>
+          <input value={pName} onChange={e=>setPName(e.target.value)} placeholder="Name" className="w-full px-3 py-2 rounded-xl bg-white/10 outline-none" />
+          <input value={pUsername} onChange={e=>setPUsername(e.target.value)} placeholder="Username" className="w-full px-3 py-2 rounded-xl bg-white/10 outline-none" />
+          <input value={pNumber} onChange={e=>setPNumber(e.target.value)} placeholder="Phone number" className="w-full px-3 py-2 rounded-xl bg-white/10 outline-none" />
+          <textarea value={pBio} onChange={e=>setPBio(e.target.value)} placeholder="Bio" className="w-full px-3 py-2 rounded-xl bg-white/10 outline-none" rows={2} />
+          <button disabled={savingProfile} onClick={saveProfile} className="w-full text-sm bg-gradient-to-r from-blue-600 to-violet-600 rounded-xl py-2 disabled:opacity-60">{savingProfile? 'Saving...' : 'Save profile'}</button>
         </div>
 
         <div className="relative">
@@ -90,7 +202,7 @@ export default function Home({ me, onLogout }) {
 
         <div>
           <div className="text-xs uppercase tracking-wide text-blue-200/60 mb-2">People</div>
-          <div className="space-y-2 max-h-[40vh] overflow-auto pr-1">
+          <div className="space-y-2 max-h-[28vh] overflow-auto pr-1">
             {results.map(u => (
               <button key={u.id} onClick={()=>openChat(u)} className="w-full flex items-center gap-3 p-2 rounded-xl hover:bg-white/5">
                 <Avatar url={u.avatar_url} name={u.name}/>
@@ -105,7 +217,7 @@ export default function Home({ me, onLogout }) {
 
         <div>
           <div className="text-xs uppercase tracking-wide text-blue-200/60 mb-2">Recent</div>
-          <div className="space-y-2 max-h-[30vh] overflow-auto pr-1">
+          <div className="space-y-2 max-h-[22vh] overflow-auto pr-1">
             {convos.map(c => (
               <button key={c.other.id} onClick={()=>openChat(c.other)} className="w-full flex items-center gap-3 p-2 rounded-xl hover:bg-white/5">
                 <Avatar url={c.other.avatar_url} name={c.other.name}/>
@@ -140,15 +252,20 @@ export default function Home({ me, onLogout }) {
                   {m.kind==='text' ? (
                     <div>{m.text}</div>
                   ) : (
-                    <a href={m.media_url} className="underline" target="_blank">{m.kind} attachment</a>
+                    <MediaBubble m={m} />
                   )}
                 </div>
               ))}
             </div>
 
-            <div className="flex gap-2">
+            <div className="flex gap-2 items-center">
+              <button onClick={onPickFile} title="Attach" className="px-3 py-3 rounded-xl bg-white/10 hover:bg-white/15">+
+              </button>
+              <input ref={fileInputRef} type="file" accept="image/*,video/*,audio/*" className="hidden" onChange={e=>{
+                const file = e.target.files?.[0]; if (file) attachAndSend(file); e.target.value='';
+              }} />
               <input value={text} onChange={e=>setText(e.target.value)} placeholder="Type a message" className="flex-1 px-4 py-3 rounded-xl bg-white/10 outline-none"/>
-              <button onClick={send} className="px-5 py-3 rounded-xl bg-gradient-to-r from-blue-600 to-violet-600">Send</button>
+              <button disabled={sending} onClick={sendText} className="px-5 py-3 rounded-xl bg-gradient-to-r from-blue-600 to-violet-600 disabled:opacity-60">Send</button>
             </div>
           </div>
         ) : (
